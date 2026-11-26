@@ -6,8 +6,10 @@ from tkinter import ttk, messagebox
 import serial
 from serial.tools import list_ports
 if __package__:
+    from .cartesian_control import CartesianControl
     from .joint_calibration import ANGLE_JOINTS, CALIBRATION_PATH, PWM_LIMITS_US, JointCalibration, load_calibrations, save_calibrations
 else:
+    from cartesian_control import CartesianControl
     from joint_calibration import ANGLE_JOINTS, CALIBRATION_PATH, PWM_LIMITS_US, JointCalibration, load_calibrations, save_calibrations
 
 
@@ -15,8 +17,8 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title('Robot Arm | PWM Controller')
-        root.geometry('900x540')
-        root.minsize(720, 450)
+        root.geometry('960x690')
+        root.minsize(800, 615)
         self.ser = None
         self.buffer = bytearray()
         self.rows = {}
@@ -30,6 +32,10 @@ class App:
         self.traceback_lines = []
         self.in_traceback = False
         self.await_pose = False
+        self.park_supported = False
+        self.parking = False
+        self.sync_supported = False
+        self.syncing = False
         self.parts = {}
         self.joint_index = 1
         self.joint_count = 6
@@ -63,11 +69,15 @@ class App:
         self.refresh()
         self.body = ttk.Frame(outer); self.body.pack(fill='both', expand=True, pady=14)
         ttk.Label(self.body, text='Connect to load joint settings. No joint is automatically enabled.').pack(anchor='w')
+        self.cartesian = CartesianControl(outer, self)
+        self.cartesian.pack(fill='x', pady=(0, 12))
         bottom = ttk.Frame(outer); bottom.pack(fill='x')
         self.hold = ttk.Button(bottom, text='Hold / cancel motion', command=lambda: self.control('hold'), state='disabled')
         self.hold.pack(side='left')
         self.stop = ttk.Button(bottom, text='Disable all PWM', style='Danger.TButton', command=self.stop_all, state='disabled')
         self.stop.pack(side='left', padx=8)
+        self.park_button = ttk.Button(bottom, text='Park & Disable PWM', command=self.park, state='disabled')
+        self.park_button.pack(side='left')
         self.copy = ttk.Button(bottom, text='Copy current pose', command=self.copy_pose, state='disabled')
         self.copy.pack(side='right')
         ttk.Label(outer, textvariable=self.status, wraplength=850).pack(anchor='w', pady=(12,0))
@@ -147,6 +157,10 @@ class App:
         self.ser = None; self.ready = False; self.startup = None
         self.phase = None
         self.await_pose = False
+        self.park_supported = False
+        self.parking = False
+        self.sync_supported = False
+        self.syncing = False
         if self.calibration_window is not None:
             self.calibration_window.destroy()
             self.calibration_window = None
@@ -154,7 +168,9 @@ class App:
         for r in self.rows.values():
             for k in ('scale','entry','button','apply','units','calibrate'):
                 r[k].config(state='disabled')
-        for b in (self.hold,self.stop,self.copy): b.config(state='disabled')
+        for b in (self.hold,self.stop,self.park_button,self.copy): b.config(state='disabled')
+        self.cartesian.invalidate()
+        self.cartesian.refresh()
         self.status.set(reason)
 
     def start_bridge(self):
@@ -291,6 +307,16 @@ class App:
                                                   name=name, model=model, speed=speed, accel=accel)
                         current[str(motor)] = p
                     self.message(dict(type='hello', motors=motors, current=current))
+        elif packet == ['cap', 'park']:
+            self.park_supported = True
+            self.update_park_button()
+        elif packet == ['cap', 'sync']:
+            self.sync_supported = True
+            self.cartesian.refresh()
+        elif kind == 'park' and self.ready and len(packet) >= 2:
+            self.park_event(packet[1], packet[2:])
+        elif kind == 'sync' and self.ready and len(packet) >= 2:
+            self.sync_event(packet[1], packet[2:])
         elif kind == 's' and self.ready and len(packet) == 4:
             self.message(dict(type='state', motor=packet[1], pulse=packet[2], busy=packet[3]))
         elif kind == 'p' and self.ready and len(packet) == 7:
@@ -305,6 +331,8 @@ class App:
                 return
             self.build(msg['motors'], msg['current'])
             self.ready = True
+            self.update_park_button()
+            self.cartesian.refresh()
             self.phase = None
             self.in_traceback = False
             self.status.set('Calibration file: ' + self.calibration_load_error if self.calibration_load_error else
@@ -317,8 +345,9 @@ class App:
                 r['awaiting'] = False
                 r['holding'] = False
             r['enabled'] = r['pulse'] is not None
-            r['button'].config(text='Off' if r['enabled'] else 'Enable', state='normal')
+            r['button'].config(text='Off' if r['enabled'] else 'Enable')
             self.update_output(motor)
+            self.cartesian.refresh()
         elif kind == 'pose':
             if self.await_pose:
                 self.await_pose = False
@@ -383,7 +412,7 @@ class App:
         row = self.rows[i]
         calibration = self.valid_calibration(i)
         row['angle_calibration'] = calibration
-        row['units'].config(state='normal' if calibration else 'disabled')
+        row['units'].config(state='normal' if calibration and not self.motion_locked else 'disabled')
         pulse = row['pulse']
         if row['busy'] or row['awaiting']:
             output = 'Moving / pending'
@@ -470,6 +499,9 @@ class App:
 
         def record():
             nonlocal draft
+            if self.motion_locked:
+                feedback.set('Wait until motion is finished before recording.')
+                return
             if row['pulse'] is None or row['busy'] is not False or row['awaiting'] or row['job'] is not None:
                 feedback.set('Wait for a confirmed, stationary PWM output before recording.')
                 return
@@ -491,6 +523,9 @@ class App:
                 refresh()
 
         def save():
+            if self.motion_locked:
+                feedback.set('Wait until motion is finished before saving.')
+                return
             try:
                 calibration = JointCalibration(draft, (row['lo'], row['hi']),
                                                extrapolation_pwm=original.extrapolation_pwm)
@@ -513,6 +548,8 @@ class App:
             self.calibrations = updated
             self.calibration_load_error = None
             self.update_output(i)
+            self.cartesian.invalidate()
+            self.cartesian.refresh()
             feedback.set('Saved to ' + CALIBRATION_PATH.name)
 
         buttons = ttk.Frame(panel)
@@ -528,6 +565,8 @@ class App:
             self.calibration_window = None
 
     def send_joint(self, op, i, pulse=None):
+        if self.motion_locked:
+            return
         command = '{} {}'.format(op, i)
         if pulse is not None:
             command += ' {}'.format(pulse)
@@ -537,6 +576,7 @@ class App:
             row['awaiting'] = True
             row['holding'] = False
             self.update_output(i)
+            self.cartesian.refresh()
 
     def target(self,i):
         r=self.rows[i]
@@ -597,9 +637,117 @@ class App:
                 row['expected'] = None
                 row['awaiting'] = True
                 self.update_output(i)
+            self.cartesian.refresh()
 
     def stop_all(self):
         self.control('stop')
+
+    def update_park_button(self):
+        enabled = self.ready and self.park_supported and not self.motion_locked
+        self.park_button.config(state='normal' if enabled else 'disabled')
+
+    @property
+    def motion_locked(self):
+        return self.parking or self.syncing
+
+    def set_parking(self, active):
+        self.parking = active
+        self.update_motion_controls()
+
+    def update_motion_controls(self):
+        self.update_park_button()
+        control_state = 'disabled' if self.motion_locked else 'normal'
+        self.copy.config(state=control_state)
+        for i, row in self.rows.items():
+            for key in ('scale', 'entry', 'button', 'apply'):
+                row[key].config(state=control_state)
+            row['calibrate'].config(state=control_state if i in ANGLE_JOINTS else 'disabled')
+            self.update_output(i)
+        self.cartesian.refresh()
+
+    def park(self):
+        if not self.park_supported or self.motion_locked:
+            return
+        self.clear_pending()
+        self.await_pose = False
+        if self.send('park'):
+            self.set_parking(True)
+            self.status.set('Requesting parking pose...')
+
+    def sync_slider_targets(self, motors):
+        for i in motors:
+            row = self.rows[i]
+            pulse = row['pulse']
+            if pulse is not None:
+                try:
+                    self.show_target(i, pulse)
+                except ValueError:
+                    # Hold may stop a joint outside its degree-control range.
+                    self.set_units(i, False, pulse)
+
+    def park_event(self, stage, motors):
+        if stage == 'moving':
+            self.clear_pending()
+            for row in self.rows.values():
+                row['awaiting'] = False
+                row['holding'] = False
+            self.set_parking(True)
+            self.status.set('Parking: moving to the parking pose.')
+        elif stage == 'settling':
+            self.sync_slider_targets(self.rows)
+            self.status.set('Parking pose commanded. Disabling PWM in 1 second.')
+        elif stage in ('done', 'held', 'stopped', 'init', 'invalid', 'busy'):
+            if stage == 'held':
+                self.sync_slider_targets(self.rows)
+            self.set_parking(False)
+            if stage == 'done':
+                message = 'Parked. PWM disabled. Servos may still hold torque.'
+            elif stage == 'held':
+                message = 'Parking cancelled. PWM held at the last commanded pose.'
+            elif stage == 'stopped':
+                message = 'Parking cancelled. PWM disabled.'
+            elif stage == 'busy':
+                message = 'Wait for synchronized motion to finish before parking.'
+            else:
+                joints = ', '.join('{} ({})'.format(i, self.rows[i]['name']) for i in motors)
+                if stage == 'init':
+                    message = 'Initialize these motors before parking: ' + joints
+                else:
+                    message = 'Parking blocked by PWM limits for motors: ' + joints
+            self.status.set(message)
+
+    def move_cartesian(self, start, target):
+        if self.motion_locked or not self.sync_supported:
+            return
+        self.clear_pending()
+        self.await_pose = False
+        if self.send('sync ' + ' '.join(map(str, (*start, *target)))):
+            self.syncing = True
+            self.update_motion_controls()
+            self.status.set('Requesting synchronized Cartesian motion...')
+
+    def sync_event(self, stage, motors):
+        if stage == 'moving':
+            self.clear_pending()
+            self.syncing = True
+            self.update_motion_controls()
+            self.status.set('Moving to the Cartesian target.')
+        elif stage in ('done', 'held', 'stopped', 'busy', 'init', 'limits', 'start'):
+            if stage in ('done', 'held'):
+                self.sync_slider_targets(ANGLE_JOINTS)
+            self.syncing = False
+            self.update_motion_controls()
+            joints = ', '.join('S{}'.format(i) for i in motors)
+            message = {
+                'done': 'Cartesian target commanded. See the estimated pose.',
+                'held': 'Cartesian move cancelled. PWM held at the last commanded pose.',
+                'stopped': 'Cartesian move cancelled. PWM disabled.',
+                'busy': 'Controller is busy. Wait for motion to settle.',
+                'init': 'Cartesian move blocked. Initialize ' + joints + '.',
+                'limits': 'Cartesian move blocked by PWM limits for ' + joints + '.',
+                'start': 'Starting command changed on ' + joints + '. Calculate IK again.',
+            }[stage]
+            self.status.set(message)
 
     def copy_pose(self):
         self.clear_pending()

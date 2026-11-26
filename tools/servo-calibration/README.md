@@ -9,27 +9,28 @@ Desktop PWM and angle calibration for the ROT3U arm with an ESP32-S3 running Mic
 
 ## Setup
 
-Run commands from this directory. Use the ESP32 serial port in place of `COM10` if it differs. Support the arm and clear its travel before connecting, uploading, or resetting. The first enable can move a joint abruptly. Disabling PWM leaves servo power connected.
+Run commands from the repository root. Support the arm and clear its travel before uploading or connecting. The first enable can move a joint abruptly. Disabling PWM leaves servo power connected.
 
 ```powershell
 python -m pip install pyserial mpremote
 ```
 
-With MicroPython already installed, create `/robot_arm` on the ESP32 if it does not exist:
+With MicroPython already installed, disconnect the GUI and close any serial monitor before deploying. In VS Code, run **Upload to ESP32** with **Ctrl+Shift+B**, or run the script in a terminal:
 
 ```powershell
-python -m mpremote connect COM10 fs mkdir :/robot_arm
+python scripts/upload_esp32.py
+python scripts/upload_esp32.py --port COM7  # if your ESP32 uses COM7
 ```
 
-Close other serial clients, then copy the bridge and its dependencies to the board:
+The default port is `COM10`. The script creates `/robot_arm/` and copies the ESP32 Python files into it, skipping identical files when the board supports SHA-256. It leaves other files and the board's root `main.py` and `boot.py` in place. An upload may interrupt the running controller as `mpremote` enters the raw REPL. The script stops at the first error and finishes without launching the controller.
+
+To open the GUI after deployment:
 
 ```powershell
-python -m mpremote connect COM10 fs cp esp32/servo_config.py esp32/servo_driver.py esp32/serial_bridge.py :/robot_arm/
-python -m mpremote connect COM10 reset
-python pc/servo_calibration_gui.py
+python tools/servo-calibration/pc/servo_calibration_gui.py
 ```
 
-Choose the serial port and click **Connect**. The GUI can start the bridge from the MicroPython REPL and also recognizes existing boards with the bridge installed as `slider_control_v2.py`. The copy uses `/robot_arm` and leaves the board's startup files in place.
+Choose the serial port and click **Connect**. The GUI can start the bridge from the MicroPython REPL and also recognizes existing boards with the bridge installed as `slider_control_v2.py`.
 
 ## Record and use joint angles
 
@@ -38,3 +39,25 @@ Choose the serial port and click **Connect**. The GUI can start the bridge from 
 3. Select a target in the degree-control range and click **µs** to switch that row to degrees. An asterisk marks an extrapolated angle. The gripper uses PWM.
 
 The displayed angle is calculated from the commanded pulse. The controller has no measured position feedback. The included calibration depends on this arm's assembly and servo horn positions. The shoulder's configured PWM limits are provisional. Verify the mechanical travel before changing joint limits or reusing the calibration on another arm.
+
+## Park the arm
+
+**Park & Disable PWM** sends the `park` command to the ESP32. Enable all six motors using pulses close to their physical positions before parking. The ESP32 checks each parking target against its configured limits and reports any motors that need initialization. After the last trajectory finishes, it waits one second and disables PWM. **Hold / cancel motion** and **Disable all PWM** can interrupt either the movement or the wait.
+
+The button is available with a serial bridge that advertises parking support. The MS24 servos may still hold torque after PWM is disabled. Servo power remains connected.
+
+## Cartesian control
+
+The origin is on the table below S1, with +Z up and +X along the straight horizontal arm. The right-hand rule defines +Y. TCP coordinates are in millimeters. Angles use the kinematic reference and are in degrees. Pitch is S2 + S3 + S4 in the plane defined by the base. Roll is S5, positive counterclockwise as viewed from the front of the gripper. The reference PWM values in `pc/geometry_config.py` give TCP (375, 0, 112) and zero pitch and roll. The FK result includes the S1–S4 axis points and TCP. S5 roll does not move the TCP in this model.
+
+1. Connect to load the board's PWM limits. With known, settled commands on S1–S5, the GUI displays the estimated current pose.
+2. Enter X, Y, Z and pitch. Leave roll blank to preserve the current commanded roll when available. **Calculate IK** previews a solution and its pulses without sending motion commands. The solver evaluates valid elbow and base branches and prefers the least joint travel from the current pose.
+3. With a bridge that supports synchronized motion, click **Move to Target** to send the validated move. Recalculate after changing the target fields or starting pose. S6 is unaffected. **Hold / cancel motion** and **Disable all PWM** remain available during the move.
+
+The path check uses calibrated angles and the synchronized PWM profile to check a 10 mm table clearance for the modeled link centerlines and TCP. It does not model arm thickness, self-collisions, workpieces, or other obstacles. The path is an interpolation in joint PWM space. The TCP can follow a curved path. Coordinates and angles are estimates derived from commanded pulses.
+
+Run the software tests from the repository root:
+
+```powershell
+python -B -m unittest discover -s tools/servo-calibration/tests -v
+```

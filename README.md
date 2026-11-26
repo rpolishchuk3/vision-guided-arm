@@ -153,6 +153,16 @@ robot-arm/
 
 ## Getting started
 
+### MicroPython deployment
+
+For the current ESP32 servo controller, install `mpremote` using `python -m pip install mpremote`.
+Disconnect the GUI and close any serial monitor. Then run **Upload to ESP32** in VS Code
+or run `python scripts/upload_esp32.py` from the repository root. Use `--port COM7` to override
+the default port `COM10`. The script copies Python firmware to `/robot_arm/`.
+
+See the [servo calibration setup](tools/servo-calibration/README.md#setup) for the full workflow.
+The numbered setup below describes the planned PlatformIO application.
+
 ### Requirements
 
 - Python 3.10 or newer
