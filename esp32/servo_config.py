@@ -51,6 +51,16 @@ SERVOS = {
     },
 }
 
+# Converted from the desktop joint calibration. Motor 6 is specified in PWM.
+PARK_POSITION = {
+    1: 2392,  # 176.60 degrees
+    2: 897,   # 136.22 degrees
+    3: 1927,  # 133.22 degrees
+    4: 2035,  # 143.14 degrees
+    5: 1998,  # 85.54 degrees
+    6: 1563,
+}
+
 # Fill in after checking which pulse actually opens/closes the gripper.
 GRIPPER_OPEN_US = None
 GRIPPER_CLOSED_US = None

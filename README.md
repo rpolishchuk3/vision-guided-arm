@@ -70,7 +70,7 @@ Hobby servos such as the MG996 have gear backlash and **no position feedback**, 
 | 4 | Wrist roll | Rotates the gripper to line up with a piece |
 | 5 | Gripper | Opens and closes the claw |
 
-> Check the channel numbers against your own wiring and update `config.py`.
+> For the current MicroPython arm, check the wiring against [servo_config.py](esp32/servo_config.py).
 
 ---
 
@@ -92,6 +92,8 @@ Hobby servos such as the MG996 have gear backlash and **no position feedback**, 
 ---
 
 ## Software architecture
+
+The diagram outlines the planned vision and game pipeline.
 
 ```
  Side camera ──┐                                  ┌── Gripper camera
@@ -117,6 +119,18 @@ All decision-making runs in Python on the laptop. The ESP32 only receives six pu
 ---
 
 ## Repository structure
+
+| Path | Current responsibility |
+|---|---|
+| `config/` | Geometry, reference PWM values, and shared measured joint calibration. |
+| `esp32/` | MicroPython servo configuration, driver, serial bridge, and optional PWM calibration CLI. |
+| `robot/` | Shared desktop serial client, angle conversion, and analytical kinematics. |
+| `gui/` | Main robot control GUI and Cartesian control. |
+| `tools/servo-calibration/` | Standalone servo calibration GUI and instructions. |
+| `tests/` | Kinematics and simulated serial tests. |
+| `scripts/` | MicroPython deployment to the ESP32. |
+
+### Planned vision and game pipeline
 
 ```
 robot-arm/
@@ -153,13 +167,32 @@ robot-arm/
 
 ## Getting started
 
-### Requirements
+### MicroPython deployment
+
+Run from the repository root with Python 3.10 or newer. The ESP32 needs MicroPython.
+
+```powershell
+python -m pip install pyserial mpremote
+```
+
+Disconnect both desktop apps and close the serial monitor before deployment. Support the arm and clear its travel because entering the MicroPython REPL can interrupt the running controller. Run **Upload to ESP32** in VS Code with **Ctrl+Shift+B**, or run:
+
+```powershell
+python scripts/upload_esp32.py
+python scripts/upload_esp32.py --port COM7
+```
+
+The default port is COM10. The script copies Python files from `esp32/` into `/robot_arm/` and skips identical files when the board supports SHA-256 hashing. The board's root startup files and other existing files stay in place. The script finishes without starting the bridge.
+
+### Planned PlatformIO setup
+
+#### Requirements
 
 - Python 3.10 or newer
 - [VS Code](https://code.visualstudio.com/) with the [PlatformIO IDE](https://platformio.org/install/ide?install=vscode) extension
 - The hardware listed above
 
-### 1. Flash the firmware
+#### 1. Flash the firmware
 
 1. Open the `firmware/` folder in VS Code with PlatformIO.
 2. Connect the ESP32-S3 over USB-C.
@@ -167,7 +200,7 @@ robot-arm/
    - If the port is not found: hold **BOOT**, tap **RESET**, release **BOOT**, and upload again.
 4. Open the serial monitor (plug icon). You should see `PCA9685 ready`.
 
-### 2. Set up Python
+#### 2. Set up Python
 
 ```bash
 git clone <repo-url>
@@ -185,7 +218,7 @@ numpy
 pyserial
 ```
 
-### 3. Configure
+#### 3. Configure
 
 Edit `config.py`:
 
@@ -197,6 +230,40 @@ Edit `config.py`:
 ---
 
 ## Usage
+
+### Desktop applications
+
+Run the main app from the repository root:
+
+```powershell
+python -m gui.robot_control
+```
+
+Use **Connect**, then the joint sliders in PWM or calibrated degrees. Enable each joint at a pulse close to its physical position. Use the [standalone calibration app](tools/servo-calibration/README.md) to edit measured points. Both apps use `config/joint_calibration.json`. Reconnect the main app after saving new points.
+
+### Park the arm
+
+**Park & Disable PWM** sends the `park` command to the ESP32. Enable all six motors using pulses close to their physical positions before parking. The ESP32 checks each parking target against its configured limits and reports any motors that need initialization. After the last trajectory finishes, it waits one second and disables PWM. **Hold / cancel motion** and **Disable all PWM** can interrupt either the movement or the wait.
+
+The button is available with a serial bridge that advertises parking support. The MS24 servos may still hold torque after PWM is disabled. Servo power remains connected.
+
+### Cartesian control
+
+The origin is on the table below S1, with +Z up and +X along the straight horizontal arm. The right-hand rule defines +Y. TCP coordinates are in millimeters. Angles use the kinematic reference and are in degrees. Pitch is S2 + S3 + S4 in the plane defined by the base. Roll is S5, positive counterclockwise as viewed from the front of the gripper. The reference PWM values in `config/geometry_config.py` give TCP (375, 0, 112) and zero pitch and roll. The FK result includes the S1–S4 axis points and TCP. S5 roll does not move the TCP in this model.
+
+1. Connect to load the board's PWM limits. With known, settled commands on S1–S5, the GUI displays the estimated current pose.
+2. Enter X, Y, Z and pitch. Leave roll blank to preserve the current commanded roll when available. **Calculate IK** previews a solution and its pulses without sending motion commands. The solver evaluates valid elbow and base branches and prefers the least joint travel from the current pose.
+3. With a bridge that supports synchronized motion, click **Move to Target** to send the validated move. Recalculate after changing the target fields or starting pose. S6 is unaffected. **Hold / cancel motion** and **Disable all PWM** remain available during the move.
+
+The path check uses calibrated angles and the synchronized PWM profile to check a 10 mm table clearance for the modeled link centerlines and TCP. It does not model arm thickness, self-collisions, workpieces, or other obstacles. The path is an interpolation in joint PWM space. The TCP can follow a curved path. Coordinates and angles are estimates derived from commanded pulses.
+
+### Software tests
+
+```powershell
+python -B -m unittest discover -s tests -v
+```
+
+### Planned application CLI
 
 ```bash
 python main.py servo-test     # move individual servos to find pulse limits and centre positions
@@ -213,6 +280,10 @@ python main.py sort           # stretch goal: colour sorting
 ---
 
 ## Serial protocol
+
+The current MicroPython bridge and desktop client use short USB serial frames at 115200 baud. See [the bridge](esp32/serial_bridge.py) and [the client](robot/client.py).
+
+### Planned PlatformIO protocol
 
 Text lines over USB serial at 115200 baud, ending with `\n`.
 
@@ -263,11 +334,9 @@ Moving only half the error each step prevents overshoot caused by camera latency
 
 ## Calibration
 
-Run these in order the first time:
-
-1. **Servo calibration** (`servo-test`): for each joint, record the pulse width at known angles and the safe minimum and maximum. Saved to `calibration/servos.json`.
-2. **Lens calibration** (`calibrate`): show a printed checkerboard to each camera from several angles. Saved to `calibration/side_camera.npz` and `tip_camera.npz`.
-3. **Board calibration** (automatic): at the start of each game, the side camera finds the 4 ArUco markers and computes the pixel-to-table homography. Moving the board only requires re-running this step.
+1. **Servo calibration** is available in the [standalone app](tools/servo-calibration/README.md). It saves measured PWM and angle pairs to `config/joint_calibration.json`. The ESP32 servo limits are configured in `esp32/servo_config.py`.
+2. **Lens calibration** (planned, `calibrate`): show a printed checkerboard to each camera from several angles. Saved to `calibration/side_camera.npz` and `tip_camera.npz`.
+3. **Board calibration** (planned, automatic): at the start of each game, the side camera finds the 4 ArUco markers and computes the pixel-to-table homography. Moving the board only requires re-running this step.
 
 ---
 
