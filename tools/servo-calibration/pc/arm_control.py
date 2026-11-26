@@ -7,7 +7,11 @@ joint_calibration.json.
 Coordinates are in cm from the middle of the base: x forward, y to the left, z up from the table.
 
 Usage:
-    python arm_control.py --port /dev/ttyACM0     (Windows: --port COM10)
+    python arm_control.py --port /dev/ttyACM0               (Windows: --port COM10)
+    python arm_control.py --port /dev/ttyACM0 --camera 0    adds vision commands (v, look)
+
+With --camera, the overhead camera sees the gripper tag (ID 4) and corrects the position:
+it moves 50% of the remaining error each time and stops under 5 mm or after 5 corrections.
 
 All servos are released (PWM off) when the program ends: after q, after an error, and after Ctrl+C.
 Close the calibration GUI first; only one program can use the serial port.
@@ -22,6 +26,10 @@ import serial
 
 from joint_calibration import load_calibrations
 from kinematics import forward_kinematics, inverse_kinematics
+
+# Only needed for the vision commands; imported when --camera is given
+cv2 = None
+bd = None
 
 
 # Set to True only after STRAIGHT_UP and DIRECTION below are filled in from the real arm.
@@ -57,6 +65,20 @@ BOARD_CENTER_X = 19.0
 BOARD_CENTER_Y = 0.0
 CELL_CM = 6.0
 HOVER_Z = 3.0
+
+# Board axes in arm axes (board_detection.py frame -> arm frame), for the board placed as now:
+# board x (tag 0 -> tag 1) points to the arm's right, board y (tag 0 -> tag 2) points toward the base
+BOARD_X_IN_ARM = (0.0, -1.0)
+BOARD_Y_IN_ARM = (-1.0, 0.0)
+
+# Visual correction (README: move 50% of the error, stop under 5 mm or after 5 corrections)
+SERVO_GAIN = 0.5
+SERVO_TOLERANCE_MM = 5.0
+SERVO_MAX_CORRECTIONS = 5
+
+# Jaw tips minus the point under the gripper tag, in arm cm. Set it if the jaws end up
+# consistently off-centre after a "v" move (tag not exactly above the jaws).
+TIP_OFFSET_CM = (0.0, 0.0)
 
 # Gripper angles to try, nearest to straight down first. Far or near cells may need a tilt.
 PITCH_OPTIONS = [-90.0, -80.0, -100.0, -70.0, -110.0, -60.0, -120.0]
@@ -387,10 +409,146 @@ def cell_position(row, col):
     return x, y
 
 
+def board_to_arm_vector(dx_mm, dy_mm):
+    """A board displacement (mm) as an arm displacement (cm)."""
+    dx_cm = (dx_mm * BOARD_X_IN_ARM[0] + dy_mm * BOARD_Y_IN_ARM[0]) / 10.0
+    dy_cm = (dx_mm * BOARD_X_IN_ARM[1] + dy_mm * BOARD_Y_IN_ARM[1]) / 10.0
+    return dx_cm, dy_cm
+
+
+def arm_to_board_vector(dx_cm, dy_cm):
+    """An arm displacement (cm) as a board displacement (mm). The axes are perpendicular,
+    so this is the reverse of board_to_arm_vector."""
+    dx_mm = (dx_cm * BOARD_X_IN_ARM[0] + dy_cm * BOARD_X_IN_ARM[1]) * 10.0
+    dy_mm = (dx_cm * BOARD_Y_IN_ARM[0] + dy_cm * BOARD_Y_IN_ARM[1]) * 10.0
+    return dx_mm, dy_mm
+
+
+class Vision:
+    """Overhead camera: finds the board and the gripper tag."""
+
+    def __init__(self, camera_index):
+        self.capture = cv2.VideoCapture(camera_index)
+        if not self.capture.isOpened():
+            raise RuntimeError("Could not open camera {}".format(camera_index))
+
+        self.tracker = bd.BoardTracker(bd.load_layout())
+
+        # Correction learned on earlier moves, used as the starting guess for the next cell
+        self.learned_offset = [0.0, 0.0]
+
+    def measure_tip(self, angles):
+        """Board position (mm) of the jaw tips, seen through the gripper tag. None if not seen."""
+
+        for attempt in range(10):
+            # Skip old frames still waiting in the camera buffer
+            for skipped in range(4):
+                self.capture.grab()
+
+            ok, frame = self.capture.read()
+            if not ok:
+                continue
+
+            self.tracker.update(frame)
+            if self.tracker.gripper is None:
+                continue
+
+            camera = self.tracker.camera()
+            if camera is None:
+                print("Board not found by the camera")
+                return None
+
+            # Where the tips should be (cm) and how the gripper is tilted
+            tip_x, tip_y, tip_z = forward_kinematics(angles[0], angles[1], angles[2], angles[3])
+            pitch = math.radians(angles[1] + angles[2] + angles[3])
+            base = math.radians(angles[0])
+
+            # The tag is TAG_TO_TIPS_MM back along the gripper from the tips
+            tag_height_mm = tip_z * 10.0 + bd.TAG_TO_TIPS_MM * math.sin(-pitch)
+            ground_x, ground_y = bd.gripper_ground_point(camera, self.tracker.gripper, tag_height_mm)
+
+            # From the point under the tag to the tips: zero when straight down, along the arm when tilted
+            reach_cm = bd.TAG_TO_TIPS_MM / 10.0 * math.cos(pitch)
+            offset_x_cm = reach_cm * math.cos(base) + TIP_OFFSET_CM[0]
+            offset_y_cm = reach_cm * math.sin(base) + TIP_OFFSET_CM[1]
+            offset_x_mm, offset_y_mm = arm_to_board_vector(offset_x_cm, offset_y_cm)
+
+            return ground_x + offset_x_mm, ground_y + offset_y_mm
+
+        print("Gripper tag not seen in 10 frames")
+        return None
+
+    def close(self):
+        self.capture.release()
+
+
+def visual_move(arm, vision, row, col, z):
+    """Hover over a cell, then correct with the camera until the tips are within 5 mm of its centre."""
+
+    target_x_mm, target_y_mm = bd.cell_center_board(row, col)
+
+    # Start from the measured board placement plus what earlier moves learned
+    guess_x, guess_y = cell_position(row, col)
+    x = guess_x + vision.learned_offset[0]
+    y = guess_y + vision.learned_offset[1]
+
+    for correction in range(SERVO_MAX_CORRECTIONS + 1):
+        arm.move_to(x, y, z, 0.0)
+
+        tip = vision.measure_tip(arm.angles)
+        if tip is None:
+            print("Stopping the correction; the arm stays here")
+            return
+
+        error_x_mm = target_x_mm - tip[0]
+        error_y_mm = target_y_mm - tip[1]
+        error_mm = math.sqrt(error_x_mm**2 + error_y_mm**2)
+        print("Camera: tips at ({:.0f}, {:.0f}) mm on the board, {:.1f} mm from the cell centre".format(
+            tip[0], tip[1], error_mm))
+
+        if error_mm < SERVO_TOLERANCE_MM:
+            break
+
+        if correction == SERVO_MAX_CORRECTIONS:
+            print("Stopped after {} corrections".format(SERVO_MAX_CORRECTIONS))
+            break
+
+        # Move only part of the error to avoid overshooting from camera delay and servo play
+        step_x_cm, step_y_cm = board_to_arm_vector(error_x_mm, error_y_mm)
+        x = x + SERVO_GAIN * step_x_cm
+        y = y + SERVO_GAIN * step_y_cm
+
+    # Remember the correction so the next cell starts closer
+    vision.learned_offset[0] = x - guess_x
+    vision.learned_offset[1] = y - guess_y
+    print("Done: {:.1f} mm from the centre (learned offset {:.1f}, {:.1f} cm)".format(
+        error_mm, vision.learned_offset[0], vision.learned_offset[1]))
+
+
+def look(arm, vision):
+    """Print where the camera sees the jaw tips, without moving."""
+
+    if arm.angles is None:
+        print("Pose unknown; move the arm first")
+        return
+
+    tip = vision.measure_tip(arm.angles)
+    if tip is None:
+        return
+
+    cell = bd.cell_at_board(tip[0], tip[1])
+    if cell is None:
+        print("Tips at ({:.0f}, {:.0f}) mm on the board, outside the grid".format(tip[0], tip[1]))
+    else:
+        print("Tips at ({:.0f}, {:.0f}) mm on the board, cell {},{}".format(tip[0], tip[1], cell[0], cell[1]))
+
+
 def print_help():
     print("\nCommands (cm and degrees):")
     print("  p x y z [yaw]      move the jaw tips to a point")
     print("  c row col [z]      hover over a cell (row 0 = far, col 0 = left), default z {:.0f}".format(HOVER_Z))
+    print("  v row col [z]      same, then correct with the camera (needs --camera)")
+    print("  look               where the camera sees the jaw tips (needs --camera)")
     print("  j b s e w r        move to joint angles")
     print("  home               home pose")
     print("  where              current joint angles and tip position")
@@ -429,7 +587,7 @@ def print_status(arm):
     print("Tip: x {:.1f}, y {:.1f}, z {:.1f} cm".format(x, y, z))
 
 
-def command_loop(arm):
+def command_loop(arm, vision):
     print_help()
 
     while True:
@@ -484,6 +642,20 @@ def command_loop(arm):
                 print("Cell {},{} -> x {:.1f}, y {:.1f}, z {:.1f} cm".format(int(values[0]), int(values[1]), x, y, z))
                 arm.move_to(x, y, z, 0.0)
 
+            elif name in ("v", "look"):
+                if vision is None:
+                    print("Start with --camera N to use the camera")
+                    continue
+
+                if name == "look":
+                    look(arm, vision)
+                else:
+                    values = read_numbers(parts, 2, 3)
+                    z = HOVER_Z
+                    if len(values) == 3:
+                        z = values[2]
+                    visual_move(arm, vision, int(values[0]), int(values[1]), z)
+
             elif name == "j":
                 values = read_numbers(parts, 5, 5)
                 arm.move_joints(values)
@@ -502,7 +674,15 @@ def command_loop(arm):
 def main():
     parser = argparse.ArgumentParser(description="Move the arm to typed coordinates")
     parser.add_argument("--port", required=True, help="ESP32 serial port, e.g. /dev/ttyACM0 or COM10")
+    parser.add_argument("--camera", type=int, help="overhead camera index, enables v and look")
     args = parser.parse_args()
+
+    vision = None
+    if args.camera is not None:
+        global cv2, bd
+        import cv2
+        import board_detection as bd
+        vision = Vision(args.camera)
 
     calibrations = load_calibrations()
     for motor in JOINT_MOTORS:
@@ -518,7 +698,7 @@ def main():
         if not CALIBRATED:
             print("Not calibrated yet: only where, grip, release and q work.")
 
-        command_loop(arm)
+        command_loop(arm, vision)
 
         # Normal quit: stand the arm up before letting go
         if CALIBRATED and arm.angles is not None:
@@ -530,6 +710,8 @@ def main():
         bridge.release_all()
         print("All servos released")
         bridge.close()
+        if vision is not None:
+            vision.close()
 
 
 if __name__ == "__main__":
