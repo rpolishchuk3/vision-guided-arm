@@ -38,6 +38,19 @@ class KinematicsTests(unittest.TestCase):
         self.assertEqual(pose.joints['S3'], (104, 0, 112))
         self.assertEqual(pose.joints['S4'], (203, 0, 112))
 
+    def test_experimental_pose_with_corrected_shoulder_direction(self):
+        pwm = (1491, 1296, 1385, 1625, 1990)
+        pose = self.arm.forward_pwm(pwm)
+        self.assertPointAlmostEqual(pose.tcp, (80.006, -1.126, 476.796), places=3)
+        self.assertAlmostEqual(pose.pitch_deg, 74.312, places=3)
+        self.assertAlmostEqual(pose.roll_deg, -3.514, places=3)
+
+        current = self.arm.pwm_to_angles(pwm)
+        self.assertGreater(current[1], 0)
+        solutions = self.arm.inverse_kinematics(*pose.tcp, pose.pitch_deg, pose.roll_deg, current=current)
+        self.assertEqual(solutions[0].pwm, pwm)
+        self.arm.validate_path(REFERENCE, solutions[0].pwm)
+
     def test_base_rotation_is_counterclockwise(self):
         self.assertPointAlmostEqual(forward_kinematics((90, 0, 0, 0, 0)).tcp, (0, 375, 112))
         self.assertPointAlmostEqual(forward_kinematics((-90, 0, 0, 0, 0)).tcp, (0, -375, 112))
@@ -70,13 +83,13 @@ class KinematicsTests(unittest.TestCase):
 
     def test_both_elbows_and_signed_radial_base_branch(self):
         # This target has negative radial reach, while its heading in table coordinates is 180°.
-        current = (0, -170, 30, -80, 0)
+        current = (0, 170, -30, 60, 0)
         pose = forward_kinematics(current)
         solutions = self.arm.inverse_kinematics(*pose.tcp, pose.pitch_deg, current=current)
         self.assertLess(pose.tcp[0], 0)
-        self.assertEqual([s.elbow for s in solutions], ['elbow-down', 'elbow-up'])
+        self.assertEqual([s.elbow for s in solutions], ['elbow-up', 'elbow-down'])
         reranked = self.arm.inverse_kinematics(*pose.tcp, pose.pitch_deg, current=solutions[1].angles_deg)
-        self.assertEqual(reranked[0].elbow, 'elbow-up')
+        self.assertEqual(reranked[0].elbow, 'elbow-down')
         for solution in solutions:
             self.assertPointAlmostEqual(forward_kinematics(solution.angles_deg).tcp, pose.tcp)
 
@@ -104,11 +117,11 @@ class KinematicsTests(unittest.TestCase):
         self.assertEqual(solution.pwm, REFERENCE)
 
     def test_axis_singularity_preserves_current_base_and_optional_roll(self):
-        current = (40, -90, 0, 0, 10)
-        solution, = self.arm.inverse_kinematics(0, 0, -263, -90, current=current)
+        current = (40, 90, 0, 0, 10)
+        solution, = self.arm.inverse_kinematics(0, 0, 487, 90, current=current)
         self.assertEqual(solution.angles_deg[0], 40)
         self.assertEqual(solution.angles_deg[4], 10)
-        self.assertPointAlmostEqual(forward_kinematics(solution.angles_deg).tcp, (0, 0, -263))
+        self.assertPointAlmostEqual(forward_kinematics(solution.angles_deg).tcp, (0, 0, 487))
 
     def test_pwm_angle_round_trips_including_reversed_axes(self):
         for axis, limits in enumerate(self.arm.angle_limits):
@@ -119,15 +132,16 @@ class KinematicsTests(unittest.TestCase):
                 self.assertEqual(self.arm.angles_to_pwm(self.arm.pwm_to_angles(pwm)), pwm)
 
     def test_path_checks_intermediate_links_and_pwm_limits(self):
-        safe = self.arm.angles_to_pwm((20, -15, 25, 0, 5))
+        safe = self.arm.angles_to_pwm((20, 15, 25, 0, 5))
         self.arm.validate_path(REFERENCE, safe)
         with self.assertRaisesRegex(ValueError, 'PWM'):
             self.arm.validate_path(REFERENCE, (419, *REFERENCE[1:]))
-        start = self.arm.angles_to_pwm((0, -170, 113, 68, 0))
-        target = self.arm.angles_to_pwm((0, 0, 113, 68, 0))
+        # Both endpoints clear the table, but S4 dips below the margin mid-move.
+        start = self.arm.angles_to_pwm((0, -4, -108, -100, 0))
+        target = self.arm.angles_to_pwm((0, -4, -58, 70, 0))
         self.arm.check_table(self.arm.forward_pwm(start))
         self.arm.check_table(self.arm.forward_pwm(target))
-        with self.assertRaisesRegex(ValueError, 'table clearance'):
+        with self.assertRaisesRegex(ValueError, 'S4.*table clearance'):
             self.arm.validate_path(start, target)
 
 
