@@ -13,12 +13,10 @@ DEFAULT_PORT = "COM10"
 
 
 def find_firmware(root):
-    candidates = (root / "tools" / "servo-calibration" / "esp32", root / "esp32")
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate.resolve()
-    searched = ", ".join(str(path.relative_to(root)) for path in candidates)
-    raise ValueError(f"Firmware directory not found in {root}. Checked {searched}.")
+    firmware = root / "esp32"
+    if not firmware.is_dir():
+        raise ValueError(f"Firmware directory not found: {firmware}")
+    return firmware.resolve()
 
 
 def upload_command(firmware, port):

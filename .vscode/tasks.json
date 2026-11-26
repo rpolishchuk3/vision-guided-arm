@@ -3,6 +3,7 @@
     "tasks": [
         {
             "label": "Upload to ESP32",
+            "detail": "Upload Python firmware from esp32/ to /robot_arm/ using mpremote.",
             "type": "process",
             "command": "python",
             "args": [

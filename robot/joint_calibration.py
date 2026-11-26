@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 
-CALIBRATION_PATH = Path(__file__).with_suffix('.json')
+CALIBRATION_PATH = Path(__file__).resolve().parents[1] / 'config' / 'joint_calibration.json'
 ANGLE_JOINTS = range(1, 6)
 PWM_LIMITS_US = (200, 3000)
 

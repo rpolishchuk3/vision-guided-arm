@@ -4,12 +4,8 @@ from dataclasses import dataclass
 from itertools import product
 import math
 
-if __package__:
-    from . import geometry_config as geom
-    from .joint_calibration import JointCalibration
-else:
-    import geometry_config as geom
-    from joint_calibration import JointCalibration
+from config import geometry_config as geom
+from .joint_calibration import JointCalibration
 
 
 EPS_MM = 1e-8

@@ -5,12 +5,12 @@ import sys
 import unittest
 
 
-TOOL_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(TOOL_ROOT))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
-from pc.geometry_config import JOINTS, REFERENCE_PWM
-from pc.joint_calibration import load_calibrations
-from pc.kinematics import ArmKinematics, forward_kinematics
+from config.geometry_config import JOINTS, REFERENCE_PWM
+from robot.joint_calibration import load_calibrations
+from robot.kinematics import ArmKinematics, forward_kinematics
 
 
 REFERENCE = tuple(REFERENCE_PWM[i] for i in JOINTS)
@@ -19,7 +19,7 @@ REFERENCE = tuple(REFERENCE_PWM[i] for i in JOINTS)
 class KinematicsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        config = runpy.run_path(str(TOOL_ROOT / 'esp32' / 'servo_config.py'))
+        config = runpy.run_path(str(REPO_ROOT / 'esp32' / 'servo_config.py'))
         cls.limits = {i: (s['min_us'], s['max_us']) for i, s in config['SERVOS'].items()}
         cls.calibrations = load_calibrations()
         cls.arm = ArmKinematics(cls.calibrations, cls.limits)

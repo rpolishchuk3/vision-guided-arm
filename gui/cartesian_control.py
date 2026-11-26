@@ -3,12 +3,8 @@
 import tkinter as tk
 from tkinter import ttk
 
-if __package__:
-    from .geometry_config import JOINTS, TABLE_CLEARANCE_MM
-    from .kinematics import ArmKinematics
-else:
-    from geometry_config import JOINTS, TABLE_CLEARANCE_MM
-    from kinematics import ArmKinematics
+from config.geometry_config import JOINTS, TABLE_CLEARANCE_MM
+from robot.kinematics import ArmKinematics
 
 
 class CartesianControl(ttk.LabelFrame):
