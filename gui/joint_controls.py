@@ -1,8 +1,9 @@
 """Joint slider and connection widgets shared by the two desktop applications."""
 
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
+from robot.ble_transport import SCAN_SECONDS
 from robot.client import RobotClient
 from robot.joint_calibration import load_calibrations
 
@@ -30,15 +31,31 @@ class JointControlApp:
         ttk.Label(outer, text=subtitle).pack(anchor='w', pady=(2, 14))
         bar = ttk.Frame(outer)
         bar.pack(fill='x')
-        ttk.Label(bar, text='Serial port').pack(side='left')
-        self.combo = ttk.Combobox(bar, textvariable=self.port, width=12)
-        self.combo.pack(side='left', padx=8)
-        ttk.Button(bar, text='Refresh', command=self.refresh_ports).pack(side='left')
+        self.connection_mode = tk.StringVar(value='USB Serial')
+        self.mode_combo = ttk.Combobox(bar, textvariable=self.connection_mode,
+                                      values=('USB Serial', 'Bluetooth LE'), state='readonly', width=13)
+        self.mode_combo.pack(side='left', padx=(0, 8))
+        self.mode_combo.bind('<<ComboboxSelected>>', self.show_transport)
+        self.transport_options = ttk.Frame(bar)
+        self.transport_options.pack(side='left')
+        self.usb_options = ttk.Frame(self.transport_options)
+        self.combo = ttk.Combobox(self.usb_options, textvariable=self.port, width=12)
+        self.combo.pack(side='left', padx=(0, 8))
+        self.refresh_button = ttk.Button(self.usb_options, text='Refresh', command=self.refresh_ports)
+        self.refresh_button.pack(side='left')
+        self.ble_options = ttk.Frame(self.transport_options)
+        self.ble_device = tk.StringVar()
+        self.ble_combo = ttk.Combobox(self.ble_options, textvariable=self.ble_device, state='readonly', width=27)
+        self.ble_combo.pack(side='left', padx=(0, 8))
+        self.ble_combo.bind('<<ComboboxSelected>>', lambda _event: self.update_connection_controls())
+        self.scan_button = ttk.Button(self.ble_options, text='Scan', command=self.scan_ble)
+        self.scan_button.pack(side='left')
         self.connect_button = ttk.Button(bar, text='Connect', command=self.connect)
         self.connect_button.pack(side='left', padx=8)
         ttk.Button(bar, text='Serial log', command=self.show_log).pack(side='left', padx=8)
         ttk.Checkbutton(bar, text='Live sliders', variable=self.live).pack(side='right')
         self.refresh_ports()
+        self.show_transport()
         self.body = ttk.Frame(outer)
         self.body.pack(fill='both', expand=True, pady=14)
         ttk.Label(self.body, text='Connect to load joint settings. No joint is automatically enabled.').pack(anchor='w')
@@ -77,9 +94,40 @@ class JointControlApp:
         if ports and self.port.get() not in ports:
             self.port.set(ports[0])
 
+    def show_transport(self, _event=None):
+        self.usb_options.pack_forget()
+        self.ble_options.pack_forget()
+        panel = self.ble_options if self.connection_mode.get() == 'Bluetooth LE' else self.usb_options
+        panel.pack(side='left')
+        self.update_connection_controls()
+
+    def update_connection_controls(self):
+        connected = self.client.connected
+        locked = connected or self.client.scanning
+        self.mode_combo.config(state='disabled' if locked else 'readonly')
+        self.combo.config(state='disabled' if locked else 'normal')
+        self.refresh_button.config(state='disabled' if locked else 'normal')
+        self.ble_combo.config(state='disabled' if locked else 'readonly')
+        self.scan_button.config(state='disabled' if locked else 'normal')
+        selection = self.connection_mode.get() == 'USB Serial' or bool(self.ble_device.get())
+        connect_enabled = connected or (selection and not self.client.scanning)
+        self.connect_button.config(text='Disconnect' if connected else 'Connect',
+                                   state='normal' if connect_enabled else 'disabled')
+
+    def scan_ble(self):
+        self.client.scan_ble()
+        self.status.set(f'Scanning for RobotArm over Bluetooth LE (up to {SCAN_SECONDS} seconds)...')
+        self.update_connection_controls()
+
     def connect(self):
         if self.client.connected:
             self.client.disconnect()
+            return
+        if self.connection_mode.get() == 'Bluetooth LE':
+            key = simpledialog.askstring('RobotArm BLE key', 'Enter the 64-character hexadecimal key.',
+                                         parent=self.root, show='*')
+            if key is not None:
+                self.client.connect_ble(self.ble_device.get(), key)
             return
         if messagebox.askokcancel(
             'Support the arm',
@@ -97,12 +145,21 @@ class JointControlApp:
     def on_event(self, event):
         kind = event['type']
         if kind == 'connected':
-            self.connect_button.config(text='Disconnect')
+            self.update_connection_controls()
         elif kind == 'disconnected':
             self.clear_pending()
-            self.connect_button.config(text='Connect')
+            self.update_connection_controls()
             self.on_disconnected()
             self.update_motion_controls()
+            self.status.set(event['message'])
+        elif kind == 'scan':
+            devices = event['devices']
+            self.ble_combo['values'] = devices
+            self.ble_device.set(devices[0] if devices else '')
+            self.update_connection_controls()
+            self.status.set('Select RobotArm and click Connect.' if devices else 'No RobotArm BLE device found.')
+        elif kind == 'scan_error':
+            self.update_connection_controls()
             self.status.set(event['message'])
         elif kind == 'hello':
             self.reload_calibration()
@@ -175,7 +232,7 @@ class JointControlApp:
             self.on_view_changed()
 
     def close(self):
-        self.client.disconnect()
+        self.client.shutdown()
         self.root.destroy()
 
     def show_log(self):

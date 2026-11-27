@@ -4,11 +4,13 @@ import math
 from collections import deque
 from pathlib import Path
 import runpy
+import sys
 from types import SimpleNamespace
 import unittest
 
 
 ESP32 = Path(__file__).resolve().parents[1] / 'esp32'
+sys.path.insert(0, str(ESP32.parent))
 CONFIG = runpy.run_path(str(ESP32 / 'servo_config.py'))
 BRIDGE = compile((ESP32 / 'serial_bridge.py').read_bytes(), 'serial_bridge.py', 'exec')
 START = (1500, 497, 1500, 1500, 2031)
@@ -19,8 +21,26 @@ class EndSimulation(Exception):
     pass
 
 
-def simulate(commands, start=START):
+def firmware_importer(modules):
+    def mocked_import(name, *args):
+        if name not in modules and name in ('arm_controller', 'arm_service', 'ble_protocol',
+                                             'ble_peripheral', 'control_link', 'link_config'):
+            module = SimpleNamespace(__name__=name, __builtins__=context)
+            modules[name] = module
+            file = ESP32 / (name + '.py')
+            exec(compile(file.read_bytes(), str(file), 'exec'), vars(module))
+        return modules[name] if name in modules else builtins.__import__(name, *args)
+
+    def no_device_files(*_args):
+        raise OSError('No board files in simulation')
+    context = {**vars(builtins), '__import__': mocked_import, 'open': no_device_files, 'print': lambda *_: None}
+    return context
+
+
+def simulate(commands, start=START, *, heartbeat=True):
     now = 0
+    if heartbeat:
+        commands = commands + [(n, 'ping') for n in range(1000, 12000, 500)]
     line_queue = deque(sorted(commands))
     chars = deque()
     frames, writes, disabled = [], [], []
@@ -70,15 +90,11 @@ def simulate(commands, start=START):
         'servo_config': SimpleNamespace(**CONFIG),
     }
 
-    def mocked_import(name, *args):
-        return modules[name] if name in modules else builtins.__import__(name, *args)
-
     try:
-        exec(BRIDGE, {'__builtins__': {**vars(builtins), '__import__': mocked_import}})
+        exec(BRIDGE, {'__builtins__': firmware_importer(modules)})
     except EndSimulation:
         pass
-    # The bridge's finally block disables all channels when ending this simulation.
-    return frames, writes, disabled[:-6], settings
+    return frames, writes, disabled, settings
 
 
 def sync_command(start=START, target=TARGET):
@@ -134,6 +150,26 @@ class BridgeTests(unittest.TestCase):
         done = next(t for t, f in frames if f == ['park', 'done'])
         self.assertEqual(done - settling, 1000)
         self.assertEqual(disabled, [(done, i) for i in range(1, 7)])
+
+    def test_usb_watchdog_holds_and_requires_a_new_handshake(self):
+        frames, writes, disabled, _ = simulate([
+            (40, 'move 1 2430'), (100, 'move 1 2300'), (200, 'ping'),
+            (500, 'move 1 2350'), (3300, 'move 1 1500'), (3400, 'hello2'), (3500, 'pose'),
+        ], heartbeat=False)
+        expired = next(t for t, frame in frames if frame == ['link', 'timeout'])
+        self.assertEqual(expired, 3200)
+        self.assertTrue(writes and all(t < expired for t, _, _ in writes))
+        self.assertFalse(disabled)
+        self.assertIn((3500, ['p', writes[-1][2], *START[1:], 1900]), frames)
+
+    def test_emergency_supersedes_queued_enables(self):
+        frames, writes, disabled, _ = simulate([
+            (40, 'enable 1 1500'), (40, 'move 1 1530'), (40, 'stop'),
+        ], (None, *START[1:]))
+        self.assertFalse(writes)
+        self.assertEqual(disabled, [(40, i) for i in range(1, 7)])
+        self.assertTrue(any(f[:2] == ['s', 1] for _, f in frames))
+        self.assertIn((40, ['cancel', 'stop']), frames)
 
 
 if __name__ == '__main__':

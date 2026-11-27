@@ -124,7 +124,7 @@ All decision-making runs in Python on the laptop. The ESP32 only receives six pu
 |---|---|
 | `config/` | Geometry, reference PWM values, and shared measured joint calibration. |
 | `esp32/` | MicroPython servo configuration, driver, serial bridge, and optional PWM calibration CLI. |
-| `robot/` | Shared desktop serial client, angle conversion, and analytical kinematics. |
+| `robot/` | Shared USB/Bluetooth LE client, angle conversion, and analytical kinematics. |
 | `gui/` | Main robot control GUI and Cartesian control. |
 | `tools/servo-calibration/` | Standalone servo calibration GUI and instructions. |
 | `tests/` | Kinematics and simulated serial tests. |
@@ -172,7 +172,7 @@ robot-arm/
 Run from the repository root with Python 3.10 or newer. The ESP32 needs MicroPython.
 
 ```powershell
-python -m pip install pyserial mpremote
+python -m pip install -r requirements.txt
 ```
 
 Disconnect both desktop apps and close the serial monitor before deployment. Support the arm and clear its travel because entering the MicroPython REPL can interrupt the running controller. Run **Upload to ESP32** in VS Code with **Ctrl+Shift+B**, or run:
@@ -183,6 +183,29 @@ python scripts/upload_esp32.py --port COM7
 ```
 
 The default port is COM10. The script copies Python files from `esp32/` into `/robot_arm/` and skips identical files when the board supports SHA-256 hashing. The board's root startup files and other existing files stay in place. The script finishes without starting the bridge.
+
+### Bluetooth LE setup
+
+Use an ESP32-S3 MicroPython build with the `bluetooth` module. Run the normal deployment first. It copies the USB/BLE service and the optional launcher into `/robot_arm/`.
+
+Generate a unique key once. Keep this file private.
+
+```powershell
+python -c "from pathlib import Path; import secrets; Path('ble_key.txt').open('x').write(secrets.token_hex(32) + chr(10))"
+python -m mpremote connect COM10 fs cp ble_key.txt :/robot_arm/ble_key.txt
+```
+
+Use the board's USB port in place of COM10 as needed. The key file is ignored by Git and excluded from the normal firmware upload. To use BLE while the board has its own power, explicitly install the power-on launcher:
+
+```powershell
+python scripts/upload_esp32.py --install-ble-startup
+```
+
+The installer checks the deployed service and key. It creates a root `main.py` only when none exists. With an existing `main.py`, back it up before integrating the call from [standalone_start.py](esp32/standalone_start.py) manually. Leave `boot.py` in place. USB recovery remains available through the MicroPython REPL. Connect over USB, support the arm, and press **Ctrl+C** to interrupt the service. An interruption leaves the last PWM active.
+
+On the next power-on the launcher advertises **RobotArm**. In either GUI, select **Bluetooth LE**, click **Scan**, select the device and click **Connect**. Paste the 64-character key into the prompt. A missing or invalid key file leaves USB available.
+
+Only one client controls the arm at a time. The BLE service authenticates with a fresh HMAC-SHA256 challenge and verifies each ordered command and response. BLE payloads are plaintext. **USB Serial** remains available from the connection menu when the prior client releases control.
 
 ### Planned PlatformIO setup
 
@@ -210,13 +233,7 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt`:
-
-```
-opencv-contrib-python
-numpy
-pyserial
-```
+The root [requirements.txt](requirements.txt) lists the current desktop and deployment dependencies.
 
 #### 3. Configure
 
@@ -281,7 +298,9 @@ python main.py sort           # stretch goal: colour sorting
 
 ## Serial protocol
 
-The current MicroPython bridge and desktop client use short USB serial frames at 115200 baud. See [the bridge](esp32/serial_bridge.py) and [the client](robot/client.py).
+The [arm controller](esp32/arm_controller.py) handles the same line commands over USB and BLE. USB uses 115200 baud. BLE uses acknowledged writes to RX and notifications from TX. Authenticated records are fragmented into chunks of at most 20 bytes and reassembled before command processing.
+
+The desktop sends a heartbeat every 500 ms and waits for a reply before sending another. The board watchdog in [link_config.py](esp32/link_config.py) defaults to 3000 ms. A BLE disconnect or a heartbeat timeout cancels active trajectories, queued targets and any pending park shutdown. The controller holds the last commanded PWM at each motor. Reconnection reads the retained commands and requires a new user action to move. **Hold** and **Disable all PWM** take priority over queued motion. Disabling PWM is separate from removing servo power.
 
 ### Planned PlatformIO protocol
 

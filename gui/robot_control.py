@@ -53,6 +53,13 @@ class App(JointControlApp):
             self.park_event(event['stage'], event['motors'])
         elif kind == 'sync':
             self.sync_event(event['stage'], event['motors'])
+        elif kind == 'cancel' and self.motion_locked:
+            hold = event['command'] == 'hold'
+            if hold:
+                self.sync_slider_targets(self.rows)
+            self.parking = self.syncing = False
+            self.update_motion_controls()
+            self.status.set('Motion cancelled. PWM held.' if hold else 'Motion cancelled. PWM disabled.')
         elif kind == 'pose' and self.await_pose:
             self.await_pose = False
             values = event['current']

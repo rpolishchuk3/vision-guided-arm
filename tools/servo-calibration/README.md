@@ -4,7 +4,7 @@ Use this standalone GUI to record the measured angle of a servo at a known PWM p
 
 ## Setup
 
-Use Python 3.10 or newer and install `pyserial` with `python -m pip install pyserial`. For the ESP32, follow the [MicroPython deployment instructions](../../README.md#micropython-deployment).
+Use Python 3.10 or newer and install the shared dependencies with `python -m pip install -r requirements.txt`. For the ESP32, follow the [MicroPython deployment instructions](../../README.md#micropython-deployment).
 
 Run from the repository root:
 
@@ -12,7 +12,7 @@ Run from the repository root:
 python tools/servo-calibration/calibration_gui.py
 ```
 
-Close the main GUI or disconnect it from the port. Support the arm and keep its travel clear, then choose the serial port and click **Connect**. The first enable can move a joint abruptly. Disabling PWM leaves servo power connected.
+Disconnect the main GUI before taking control in this app. Support the arm and keep its travel clear. In **USB Serial** mode, select the port and click **Connect**. In **Bluetooth LE** mode, click **Scan**, choose **RobotArm**, then connect with the shared key from the [BLE setup](../../README.md#bluetooth-le-setup). Losing the connection cancels motion and holds the most recent PWM. The first enable can move a joint abruptly. Disabling PWM leaves servo power connected.
 
 ## Record joint angles
 

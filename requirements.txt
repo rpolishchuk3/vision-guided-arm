@@ -1,0 +1,5 @@
+bleak>=0.22
+mpremote
+numpy
+opencv-contrib-python
+pyserial
